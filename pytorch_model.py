@@ -4,6 +4,7 @@ from torch.autograd import Variable
 from torch.nn import Parameter
 import torch.nn.functional as F
 import math
+import pdb
 
 
 class ProdLDA(nn.Module):
@@ -17,14 +18,14 @@ class ProdLDA(nn.Module):
         self.en2_fc     = nn.Linear(ac.en1_units, ac.en2_units)             # 100  -> 100
         self.en2_drop   = nn.Dropout(0.2)
         self.mean_fc    = nn.Linear(ac.en2_units, ac.num_topic)             # 100  -> 50
-        self.mean_bn    = nn.BatchNorm1d(ac.num_topic)                      # bn for mean
+        self.mean_bn    = nn.BatchNorm1d(ac.num_topic, affine=False)                      # bn for mean
         self.logvar_fc  = nn.Linear(ac.en2_units, ac.num_topic)             # 100  -> 50
-        self.logvar_bn  = nn.BatchNorm1d(ac.num_topic)                      # bn for logvar
+        self.logvar_bn  = nn.BatchNorm1d(ac.num_topic, affine=False)                      # bn for logvar
         # z
         self.p_drop     = nn.Dropout(0.2)
         # decoder
         self.decoder    = nn.Linear(ac.num_topic, ac.num_input)             # 50   -> 1995
-        self.decoder_bn = nn.BatchNorm1d(ac.num_input)                      # bn for decoder
+        self.decoder_bn = nn.BatchNorm1d(ac.num_input, affine=False)                      # bn for decoder
         # prior mean and variance as constant buffers
         prior_mean   = torch.Tensor(1, ac.num_topic).fill_(0)
         prior_var    = torch.Tensor(1, ac.num_topic).fill_(ac.variance)
@@ -37,10 +38,12 @@ class ProdLDA(nn.Module):
             #std = 1. / math.sqrt( ac.init_mult * (ac.num_topic + ac.num_input))
             self.decoder.weight.data.uniform_(0, ac.init_mult)
         # remove BN's scale parameters
+        '''
         self.logvar_bn .register_parameter('weight', None)
         self.mean_bn   .register_parameter('weight', None)
         self.decoder_bn.register_parameter('weight', None)
         self.decoder_bn.register_parameter('weight', None)
+        '''
 
     def forward(self, input, compute_loss=False, avg_loss=True):
         # compute posterior
@@ -53,10 +56,10 @@ class ProdLDA(nn.Module):
         # take sample
         eps = Variable(input.data.new().resize_as_(posterior_mean.data).normal_()) # noise
         z = posterior_mean + posterior_var.sqrt() * eps                 # reparameterization
-        p = F.softmax(z)                                                # mixture probability
+        p = F.softmax(z, dim=1)                                                # mixture probability
         p = self.p_drop(p)
         # do reconstruction
-        recon = F.softmax(self.decoder_bn(self.decoder(p)))             # reconstructed distribution over vocabulary
+        recon = F.softmax(self.decoder_bn(self.decoder(p)), dim=1)             # reconstructed distribution over vocabulary
 
         if compute_loss:
             return recon, self.loss(input, recon, posterior_mean, posterior_logvar, posterior_var, avg_loss)
@@ -85,3 +88,17 @@ class ProdLDA(nn.Module):
         else:
             return loss
 
+    def transform(self, input):
+        # compute posterior
+        en1 = F.softplus(self.en1_fc(input))                            # en1_fc   output
+        en2 = F.softplus(self.en2_fc(en1))                              # encoder2 output
+        en2 = self.en2_drop(en2)
+        posterior_mean   = self.mean_bn  (self.mean_fc  (en2))          # posterior mean
+        posterior_logvar = self.logvar_bn(self.logvar_fc(en2))          # posterior log variance
+        posterior_var    = posterior_logvar.exp()
+        # take sample
+        eps = Variable(input.data.new().resize_as_(posterior_mean.data).normal_()) # noise
+        #z = posterior_mean + posterior_var.sqrt() * eps                 # reparameterization
+        z = posterior_mean                 # reparameterization
+        p = F.softmax(z, dim=1)                                                # mixture probability
+        return p
